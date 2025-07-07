@@ -1,0 +1,128 @@
+#!/bin/bash
+
+# MNI_ROI2DSI.sh - Script for processing DTI data with ROI transformations
+# Usage: ./MNI_ROI2DSI.sh <SUBJECT_ID> [WAVE_NUMBER]
+
+set -e  # Exit on error
+set -u  # Treat unset variables as error
+
+# Display help if no arguments provided
+if [ $# -eq 0 ]; then
+    echo "Usage: $0 <SUBJECT_ID> [WAVE_NUMBER]"
+    echo "WAVE_NUMBER can be 1, 2, or 3"
+    exit 1
+fi
+
+SUBJ=$1
+echo "Processing subject: $SUBJ"
+
+###############################################################################
+# Configuration section
+###############################################################################
+
+# Determine participant group
+if [ -z "${2:-}" ]; then
+    echo "Please select which participant group to run this script on:"
+    select TYPE in "Wave1" "Wave2" "Wave3"; do
+        case $TYPE in
+            Wave[123]) 
+                break
+                ;;
+            *)
+                echo "Invalid selection. Please choose 1-4."
+                ;;
+        esac
+    done
+else
+    TYPE=$2
+    # Normalize input (case insensitive, wave number only)
+    elif [[ "$TYPE" =~ ^[123]$ ]]; then
+        TYPE="Wave${TYPE}"
+    elif [[ "$TYPE" =~ ^[Ww][Aa][Vv][Ee][123]$ ]]; then
+        TYPE="Wave${TYPE: -1}"
+    else
+        echo "Error: TYPE must be either 1, 2, 3"
+        exit 1
+    fi
+fi
+
+# Set directories based on participant group
+    BASE_DIR="/your/base/path"
+fi
+
+T1DIR="${BASE_DIR}/MRI/T1/Preprocessed"
+DTI_PREPROC="${BASE_DIR}/MRI/DTI/dti_preproc"
+OUTDIR="project/pathway"
+
+DSI_STUDIO="/your/base/path/software/dsistudio/build/dsi_studio"
+
+###############################################################################
+# Create output directory structure
+###############################################################################
+
+mkdir -p "${OUTDIR}/Current/${SUBJ}"
+
+###############################################################################
+# ROI Transformations
+###############################################################################
+
+# Transform Brodmann area 7 ROIs from MNI to subject space
+for hemisphere in L R; do
+    input_roi="${OUTDIR}/ROI_Brod7_${hemisphere}.nii.gz"
+    output_roi="${OUTDIR}/Current/${SUBJ}/${SUBJ}_Brod7_${hemisphere}.nii.gz"
+    
+    if [ ! -f "$input_roi" ]; then
+        echo "Error: Input ROI file not found: $input_roi"
+        exit 1
+    fi
+
+    antsApplyTransforms -v -n NearestNeighbor -d 3 \
+        -i "$input_roi" \
+        -r "${DTI_PREPROC}/${SUBJ}/DTIPrep/B0_bet.nii.gz" \
+        -o "$output_roi" \
+        -t "[${DTI_PREPROC}/${SUBJ}/B02T1/B02T1_0GenericAffine.mat,1]" \
+        -t "${DTI_PREPROC}/${SUBJ}/B02T1/B02T1_1InverseWarp.nii.gz" \
+        -t "${T1DIR}/${SUBJ}/MNI2T1/MNI2T1_1Warp.nii.gz" \
+        -t "${T1DIR}/${SUBJ}/MNI2T1/MNI2T1_0GenericAffine.mat"
+done
+
+# Combine left and right Brodmann area 7 ROIs
+fslmaths "${OUTDIR}/Current/${SUBJ}/${SUBJ}_Brod7_L.nii.gz" \
+    -add "${OUTDIR}/Current/${SUBJ}/${SUBJ}_Brod7_R.nii.gz" \
+    -bin "${OUTDIR}/Current/${SUBJ}/${SUBJ}_ROI_Brod7.nii.gz"
+
+###############################################################################
+# Tractography
+###############################################################################
+
+# Copy cerebellum white matter ROIs from FSparc
+for hemisphere in Left Right; do
+    fs_roi="${DTI_PREPROC}/${SUBJ}/FSparc/7_${hemisphere}-Cerebellum-White-Matter_T1_B0_bin.nii.gz"
+    output_roi="${OUTDIR}/Current/${SUBJ}/${hemisphere}-Cerebellum-WM.nii.gz"
+    
+    if [ -f "$fs_roi" ]; then
+        cp "$fs_roi" "$output_roi"
+    else
+        echo "Warning: FSparc ROI not found: $fs_roi"
+    fi
+done
+
+# Example tractography command (commented out as it may need adjustment)
+# $DSI_STUDIO --action=trk \
+#     --source="${DTI_PREPROC}/${SUBJ}/Deterministic/DSI_Studio/${SUBJ}.src.gz.flipped.dti.fib.gz" \
+#     --method=0 \
+#     --seed_plan=1 \
+#     --turning_angle=60 \
+#     --roi="${OUTDIR}/Current/${SUBJ}/Right-Cerebellum-WM.nii.gz" \
+#     --roi2="${OUTDIR}/Current/${SUBJ}/${SUBJ}_ROI_Brod7.nii.gz" \
+#     --seed_count=1000000 \
+#     --step_size=1.0 \
+#     --fa_threshold=0.12 \
+#     --smoothing=0.00 \
+#     --min_length=20 \
+#     --max_length=500 \
+#     --thread_count=2 \
+#     --output="${OUTDIR}/Current/${SUBJ}/${SUBJ}_Cerebellum_Tracts.trk" \
+#     --export=stat,tdi
+
+echo "Processing completed for subject: $SUBJ"
